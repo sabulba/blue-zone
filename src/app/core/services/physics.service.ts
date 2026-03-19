@@ -5,9 +5,12 @@ import { BallPositions, Shot } from '../models/game.model';
 export const ARENA = {
     W: 800,
     H: 1000,
-    WALL: 10,
-    BALL_R: 36,
-    SHOT_FORCE: 0.18,
+    WALL: 50,
+    WALL_INSET: 8,      // walls align with decorative frame inset
+    BALL_R: 72,
+    MAX_VELOCITY: 40,
+    MIN_VELOCITY: 4,
+    SWIPE_SCALE: 0.12,
     BALL_START_P1: { x: 300, y: 790 },
     BALL_START_P2: { x: 500, y: 790 },
     BALL_START_WHITE: { x: 400, y: 620 },
@@ -52,7 +55,7 @@ export class PhysicsService {
         const dx = shot.aimX - shooter.position.x;
         const dy = shot.aimY - shooter.position.y;
         const len = Math.hypot(dx, dy) || 1;
-        Matter.Body.applyForce(shooter, shooter.position, {
+        Matter.Body.setVelocity(shooter, {
             x: (dx / len) * shot.force,
             y: (dy / len) * shot.force,
         });
@@ -81,8 +84,7 @@ export class PhysicsService {
     //
     // Rules:
     //   Miss white ball        → opponent +3
-    //   White ball in forbidden → opponent +5
-    //   Opponent ball in forbidden → active player +5
+    //   Opponent ball in danger zone → active player +5
     evaluateScore(
         result: Pick<SimResult, 'hitWhite' | 'whiteBallInForbidden' | 'opponentBallInForbidden'>,
     ): ScoreResult {
@@ -91,8 +93,6 @@ export class PhysicsService {
 
         if (!result.hitWhite) {
             opponentPoints += 3;            // penalty → opponent reward
-        } else if (result.whiteBallInForbidden) {
-            opponentPoints += 5;            // penalty → opponent reward
         }
 
         if (result.opponentBallInForbidden) {
@@ -110,15 +110,16 @@ export class PhysicsService {
         const engine = Matter.Engine.create({ gravity: { x: 0, y: 0 } });
         const { W, H, WALL, BALL_R } = ARENA;
 
-        const wallOpts: Matter.IChamferableBodyDefinition = { isStatic: true, label: 'wall', restitution: 0.7 };
+        const wallOpts: Matter.IChamferableBodyDefinition = { isStatic: true, label: 'wall', restitution: 1.0 };
+        const fi = ARENA.WALL_INSET;
         const walls = [
-            Matter.Bodies.rectangle(W / 2, -WALL / 2, W + WALL * 2, WALL, wallOpts),
-            Matter.Bodies.rectangle(W / 2, H + WALL / 2, W + WALL * 2, WALL, wallOpts),
-            Matter.Bodies.rectangle(-WALL / 2, H / 2, WALL, H, wallOpts),
-            Matter.Bodies.rectangle(W + WALL / 2, H / 2, WALL, H, wallOpts),
+            Matter.Bodies.rectangle(W / 2, fi - WALL / 2, W + WALL * 2, WALL, wallOpts),
+            Matter.Bodies.rectangle(W / 2, H - fi + WALL / 2, W + WALL * 2, WALL, wallOpts),
+            Matter.Bodies.rectangle(fi - WALL / 2, H / 2, WALL, H + WALL * 2, wallOpts),
+            Matter.Bodies.rectangle(W - fi + WALL / 2, H / 2, WALL, H + WALL * 2, wallOpts),
         ];
 
-        const ballOpts: Matter.IBodyDefinition = { restitution: 0.75, friction: 0.005, frictionAir: 0.025, density: 0.00025 };
+        const ballOpts: Matter.IBodyDefinition = { restitution: 0.8, friction: 0.005, frictionAir: 0.01, density: 0.0000625 };
 
         const pShooter = positions[shooterUid] ?? ARENA.BALL_START_P1;
         const pOpponent = positions[opponentUid] ?? ARENA.BALL_START_P2;

@@ -48,9 +48,16 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     private simulating = false;
     private lastShotTimestamp = 0;
 
-    private aimX = 0;
-    private aimY = 0;
-    private aimActive = false;
+    // Shooting state machine: idle → target-placed → swiping → (fire) → idle
+    private shootPhase: 'idle' | 'target-placed' | 'swiping' = 'idle';
+    private targetX = 0;
+    private targetY = 0;
+    private swipeStartX = 0;
+    private swipeStartY = 0;
+    private swipeCurrentX = 0;
+    private swipeCurrentY = 0;
+    private shotVelocity = 0;
+    private pendingPositions: BallPositions | null = null;
 
     ngAfterViewInit(): void {
         this.initEngine();
@@ -63,7 +70,7 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         if (changes['canShoot']) {
             console.log('[arena] canShoot:', this.canShoot, 'myUid:', this.myUid,
                 'activePlayerUid:', this.game?.activePlayerUid);
-            if (!this.canShoot) this.aimActive = false;
+        if (!this.canShoot) { this.shootPhase = 'idle'; this.shotVelocity = 0; }
         }
 
         if (changes['game']) {
@@ -75,8 +82,13 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
                 this.runShot(shot);
             }
 
-            if (!shot && curr.ballPositions && !this.simulating) {
-                this.syncBallPositions(curr.ballPositions);
+            if (!shot && curr.ballPositions) {
+                if (!this.simulating) {
+                    this.syncBallPositions(curr.ballPositions);
+                } else {
+                    // Authoritative positions arrived while simulating — buffer them
+                    this.pendingPositions = curr.ballPositions;
+                }
             }
         }
     }
@@ -86,35 +98,63 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         if (this.engine) Matter.Engine.clear(this.engine);
     }
 
-    onMouseMove(event: MouseEvent): void {
-        const { x, y } = this.canvasCoords(event.clientX, event.clientY);
-        this.aimX = x;
-        this.aimY = y;
-        this.aimActive = true;
-    }
+    /* ── Pointer handlers (unified mouse + touch via PointerEvent) ── */
 
-    onMouseLeave(): void {
-        this.aimActive = false;
-    }
-
-    onCanvasClick(event: MouseEvent): void {
-        if (!this.canShoot || this.simulating) return;
-        const { x, y } = this.canvasCoords(event.clientX, event.clientY);
-        this.aimX = x;
-        this.aimY = y;
-        this.aimActive = true;
-        this.fire();
-    }
-
-    onTouchStart(event: TouchEvent): void {
-        if (!this.canShoot || this.simulating) return;
+    onPointerDown(event: PointerEvent): void {
         event.preventDefault();
-        const touch = event.touches[0];
-        const { x, y } = this.canvasCoords(touch.clientX, touch.clientY);
-        this.aimX = x;
-        this.aimY = y;
-        this.aimActive = true;
-        this.fire();
+        if (!this.canShoot || this.simulating) return;
+        const { x, y } = this.canvasCoords(event.clientX, event.clientY);
+        this.handleDown(x, y);
+    }
+
+    onPointerMove(event: PointerEvent): void {
+        if (this.shootPhase !== 'swiping') return;
+        event.preventDefault();
+        const { x, y } = this.canvasCoords(event.clientX, event.clientY);
+        this.handleMove(x, y);
+    }
+
+    onPointerUp(): void {
+        if (this.shootPhase !== 'swiping') return;
+        this.handleUp();
+    }
+
+    private handleDown(x: number, y: number): void {
+        const ball = this.shooterBody;
+        const dist = Math.hypot(x - ball.position.x, y - ball.position.y);
+
+        if (this.shootPhase === 'target-placed' && dist <= ARENA.BALL_R * 1.8) {
+            // Tap on own ball → start power swipe
+            this.shootPhase = 'swiping';
+            this.swipeStartX = x;
+            this.swipeStartY = y;
+            this.swipeCurrentX = x;
+            this.swipeCurrentY = y;
+            this.shotVelocity = 0;
+        } else {
+            // Place / move target marker
+            this.targetX = x;
+            this.targetY = y;
+            this.shootPhase = 'target-placed';
+        }
+    }
+
+    private handleMove(x: number, y: number): void {
+        this.swipeCurrentX = x;
+        this.swipeCurrentY = y;
+        const swipeDist = Math.hypot(x - this.swipeStartX, y - this.swipeStartY);
+        this.shotVelocity = Math.min(
+            ARENA.MAX_VELOCITY,
+            Math.max(ARENA.MIN_VELOCITY, swipeDist * ARENA.SWIPE_SCALE),
+        );
+    }
+
+    private handleUp(): void {
+        if (this.shotVelocity >= ARENA.MIN_VELOCITY) {
+            this.fireShot();
+        }
+        this.shootPhase = 'idle';
+        this.shotVelocity = 0;
     }
 
     // isMyTurn is used only for the aim-line rendering in draw().
@@ -133,15 +173,16 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         this.engine = Matter.Engine.create({ gravity: { x: 0, y: 0 } });
         const { W, H, WALL, BALL_R } = ARENA;
 
-        const wOpts: Matter.IChamferableBodyDefinition = { isStatic: true, restitution: 0.7 };
+        const wOpts: Matter.IChamferableBodyDefinition = { isStatic: true, restitution: 1.0 };
+        const fi = ARENA.WALL_INSET;
         const walls = [
-            Matter.Bodies.rectangle(W / 2, -WALL / 2, W + WALL * 2, WALL, wOpts),
-            Matter.Bodies.rectangle(W / 2, H + WALL / 2, W + WALL * 2, WALL, wOpts),
-            Matter.Bodies.rectangle(-WALL / 2, H / 2, WALL, H, wOpts),
-            Matter.Bodies.rectangle(W + WALL / 2, H / 2, WALL, H, wOpts),
+            Matter.Bodies.rectangle(W / 2, fi - WALL / 2, W + WALL * 2, WALL, wOpts),
+            Matter.Bodies.rectangle(W / 2, H - fi + WALL / 2, W + WALL * 2, WALL, wOpts),
+            Matter.Bodies.rectangle(fi - WALL / 2, H / 2, WALL, H + WALL * 2, wOpts),
+            Matter.Bodies.rectangle(W - fi + WALL / 2, H / 2, WALL, H + WALL * 2, wOpts),
         ];
 
-        const bOpts: Matter.IBodyDefinition = { restitution: 0.75, friction: 0.005, frictionAir: 0.025, density: 0.00025 };
+        const bOpts: Matter.IBodyDefinition = { restitution: 0.8, friction: 0.005, frictionAir: 0.01, density: 0.0000625 };
 
         const shooter = Matter.Bodies.circle(p0.x, p0.y, BALL_R, { ...bOpts, label: order[0] });
         const opponent = Matter.Bodies.circle(p1.x, p1.y, BALL_R, { ...bOpts, label: order[1] });
@@ -155,27 +196,58 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         const canvas = this.canvasRef.nativeElement;
         const ctx = canvas.getContext('2d')!;
         const step = () => {
-            if (this.simulating) Matter.Engine.update(this.engine, 1000 / 60);
+            if (this.simulating) {
+                Matter.Engine.update(this.engine, 1000 / 60);
+                this.clampBodies();
+            }
             this.draw(ctx);
             this.rafId = requestAnimationFrame(step);
         };
         this.rafId = requestAnimationFrame(step);
     }
 
-    private fire(): void {
+    /**
+     * Safety net: only catches balls that tunnel through walls.
+     * Uses a tolerance so normal wall bounces (tiny sub-pixel penetration)
+     * are handled by Matter.js, not by this clamp.
+     */
+    private clampBodies(): void {
+        const { W, H, BALL_R, WALL_INSET } = ARENA;
+        const pad = BALL_R + WALL_INSET;
+        const tolerance = 8; // only intervene if ball is 8+ px past the wall
+        const minX = pad - tolerance;
+        const maxX = W - pad + tolerance;
+        const minY = pad - tolerance;
+        const maxY = H - pad + tolerance;
+        for (const body of [this.bodies.shooter, this.bodies.opponent, this.bodies.white]) {
+            const { x, y } = body.position;
+            if (x < minX || x > maxX || y < minY || y > maxY) {
+                Matter.Body.setPosition(body, {
+                    x: Math.max(pad, Math.min(W - pad, x)),
+                    y: Math.max(pad, Math.min(H - pad, y)),
+                });
+                Matter.Body.setVelocity(body, {
+                    x: x < minX || x > maxX ? -body.velocity.x * 0.8 : body.velocity.x,
+                    y: y < minY || y > maxY ? -body.velocity.y * 0.8 : body.velocity.y,
+                });
+            }
+        }
+    }
+
+    private fireShot(): void {
         const shooterBody = this.shooterBody;
-        console.log('[fire] myUid:', this.myUid, 'shooterBody label:', shooterBody.label, 'pos:', shooterBody.position);
+        const vel = this.shotVelocity;
+        console.log('[fire] myUid:', this.myUid, 'vel:', vel, 'target:', this.targetX, this.targetY);
         const shot: Shot = {
             shooterUid: this.myUid,
-            aimX: this.aimX,
-            aimY: this.aimY,
-            force: ARENA.SHOT_FORCE,
+            aimX: this.targetX,
+            aimY: this.targetY,
+            force: vel,           // reuse field for velocity magnitude
             ballPositions: this.currentBallPositions(),
             timestamp: Date.now(),
         };
-        this.aimActive = false;
         this.shotFired.emit(shot);
-        this.applyForce(shooterBody, this.aimX, this.aimY, ARENA.SHOT_FORCE);
+        this.launchBall(shooterBody, this.targetX, this.targetY, vel);
         this.waitForRest(shot);
     }
 
@@ -188,17 +260,17 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         // Opponent's shot: sync starting positions then replay the physics.
         this.syncBallPositions(shot.ballPositions);
         const shooterBody = this.bodyForUid(shot.shooterUid);
-        this.applyForce(shooterBody, shot.aimX, shot.aimY, shot.force);
+        this.launchBall(shooterBody, shot.aimX, shot.aimY, shot.force);
         this.waitForRest(shot);
     }
 
-    private applyForce(body: Matter.Body, aimX: number, aimY: number, force: number): void {
+    private launchBall(body: Matter.Body, aimX: number, aimY: number, velocity: number): void {
         const dx = aimX - body.position.x;
         const dy = aimY - body.position.y;
         const len = Math.hypot(dx, dy) || 1;
-        Matter.Body.applyForce(body, body.position, {
-            x: (dx / len) * force,
-            y: (dy / len) * force,
+        Matter.Body.setVelocity(body, {
+            x: (dx / len) * velocity,
+            y: (dy / len) * velocity,
         });
         this.simulating = true;
     }
@@ -228,6 +300,12 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
                 self.simulating = false;
                 Matter.Events.off(self.engine, 'collisionStart', onCollide);
 
+                // Apply authoritative positions that arrived during simulation
+                if (self.pendingPositions) {
+                    self.syncBallPositions(self.pendingPositions);
+                    self.pendingPositions = null;
+                }
+
                 const newPositions = self.currentBallPositions();
                 const whiteBallInForbidden = self.inForbidden(self.bodies.white.position);
                 const opponentBallInForbidden = self.inForbidden(
@@ -250,41 +328,77 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         ctx.fillStyle = '#1a3a2a';
         ctx.fillRect(0, 0, W, H);
 
-        // Thin decorative frame
+        // Decorative frame
         const F = 8;
-        ctx.strokeStyle = 'rgba(180,120,60,0.55)';
-        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+        ctx.strokeStyle = 'rgba(180,120,60,0.85)';
+        ctx.lineWidth = 4;
         ctx.strokeRect(F, F, W - F * 2, H - F * 2);
 
-        ctx.fillStyle = 'rgba(220, 38, 38, 0.18)';
+        ctx.fillStyle = 'rgba(30, 80, 220, 0.22)';
         ctx.fillRect(FORBIDDEN.x, FORBIDDEN.y, FORBIDDEN.w, FORBIDDEN.h);
-        ctx.strokeStyle = '#dc2626';
+        ctx.strokeStyle = '#3b82f6';
         ctx.lineWidth = 2;
         ctx.setLineDash([6, 4]);
         ctx.strokeRect(FORBIDDEN.x, FORBIDDEN.y, FORBIDDEN.w, FORBIDDEN.h);
         ctx.setLineDash([]);
 
-        ctx.fillStyle = 'rgba(220, 38, 38, 0.7)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
         ctx.font = 'bold 32px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('FORBIDDEN', FORBIDDEN.x + FORBIDDEN.w / 2, FORBIDDEN.y + FORBIDDEN.h / 2 + 11);
+        ctx.fillText('DANGER', FORBIDDEN.x + FORBIDDEN.w / 2, FORBIDDEN.y + FORBIDDEN.h / 2 + 11);
 
-        if (this.aimActive && this.canShoot && !this.simulating) {
-            const sb = this.shooterBody;
-            ctx.beginPath();
-            ctx.moveTo(sb.position.x, sb.position.y);
-            ctx.lineTo(this.aimX, this.aimY);
-            ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([8, 5]);
-            ctx.stroke();
+        // Pulsing ring around own ball when target is placed (tap-here hint)
+        if (this.shootPhase === 'target-placed' && this.canShoot) {
+            const ball = this.shooterBody;
+            const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
             ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.arc(ball.position.x, ball.position.y, BALL_R + 8 + pulse * 6, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 220, 0, ${(0.4 + pulse * 0.4).toFixed(2)})`;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        // Target marker (yellow circle + red center dot)
+        if (this.shootPhase !== 'idle') {
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.arc(this.targetX, this.targetY, 10, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 220, 0, 0.7)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(200, 170, 0, 0.9)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
 
             ctx.beginPath();
-            ctx.arc(this.aimX, this.aimY, 6, 0, Math.PI * 2);
-            ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-            ctx.lineWidth = 1;
+            ctx.arc(this.targetX, this.targetY, 3, 0, Math.PI * 2);
+            ctx.fillStyle = '#dc2626';
+            ctx.fill();
+        }
+
+        // Velocity badge above ball during swipe
+        if (this.shootPhase === 'swiping' && this.shotVelocity > 0) {
+            const ball = this.shooterBody;
+            const bx = ball.position.x;
+            const by = ball.position.y - BALL_R - 44;
+            const velText = Math.round(this.shotVelocity).toString();
+            const badgeR = 36;
+
+            ctx.beginPath();
+            ctx.arc(bx, by, badgeR, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.lineWidth = 3;
             ctx.stroke();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 28px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(velText, bx, by);
+            ctx.textBaseline = 'alphabetic';
         }
 
         const order = this.game.playerOrder;
