@@ -1,8 +1,8 @@
 <div class="arena-wrapper">
     <canvas
         #canvas
-        [width]="800"
-        [height]="500"
+        [width]="arenaW"
+        [height]="arenaH"
         class="arena-canvas"
         [class.my-turn]="canShoot"
         (mousemove)="onMouseMove($event)"

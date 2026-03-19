@@ -39,6 +39,9 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     private physics = inject(PhysicsService);
     private zone = inject(NgZone);
 
+    readonly arenaW = ARENA.W;
+    readonly arenaH = ARENA.H;
+
     private engine!: Matter.Engine;
     private bodies!: { shooter: Matter.Body; opponent: Matter.Body; white: Matter.Body };
     private rafId = 0;
@@ -84,9 +87,9 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     }
 
     onMouseMove(event: MouseEvent): void {
-        const rect = this.canvasRef.nativeElement.getBoundingClientRect();
-        this.aimX = event.clientX - rect.left;
-        this.aimY = event.clientY - rect.top;
+        const { x, y } = this.canvasCoords(event.clientX, event.clientY);
+        this.aimX = x;
+        this.aimY = y;
         this.aimActive = true;
     }
 
@@ -96,11 +99,9 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
 
     onCanvasClick(event: MouseEvent): void {
         if (!this.canShoot || this.simulating) return;
-        // Use the click coordinates as the aim target —
-        // works even if mousemove was never fired (touch, first click, etc.)
-        const rect = this.canvasRef.nativeElement.getBoundingClientRect();
-        this.aimX = event.clientX - rect.left;
-        this.aimY = event.clientY - rect.top;
+        const { x, y } = this.canvasCoords(event.clientX, event.clientY);
+        this.aimX = x;
+        this.aimY = y;
         this.aimActive = true;
         this.fire();
     }
@@ -109,9 +110,9 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         if (!this.canShoot || this.simulating) return;
         event.preventDefault();
         const touch = event.touches[0];
-        const rect = this.canvasRef.nativeElement.getBoundingClientRect();
-        this.aimX = touch.clientX - rect.left;
-        this.aimY = touch.clientY - rect.top;
+        const { x, y } = this.canvasCoords(touch.clientX, touch.clientY);
+        this.aimX = x;
+        this.aimY = y;
         this.aimActive = true;
         this.fire();
     }
@@ -140,7 +141,7 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
             Matter.Bodies.rectangle(W + WALL / 2, H / 2, WALL, H, wOpts),
         ];
 
-        const bOpts: Matter.IBodyDefinition = { restitution: 0.75, friction: 0.005, frictionAir: 0.025 };
+        const bOpts: Matter.IBodyDefinition = { restitution: 0.75, friction: 0.005, frictionAir: 0.025, density: 0.00025 };
 
         const shooter = Matter.Bodies.circle(p0.x, p0.y, BALL_R, { ...bOpts, label: order[0] });
         const opponent = Matter.Bodies.circle(p1.x, p1.y, BALL_R, { ...bOpts, label: order[1] });
@@ -249,24 +250,11 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         ctx.fillStyle = '#1a3a2a';
         ctx.fillRect(0, 0, W, H);
 
-        const WL = ARENA.WALL;
-        ctx.fillStyle = '#2a1a10';
-        ctx.fillRect(0, 0, W, WL);
-        ctx.fillRect(0, H - WL, W, WL);
-        ctx.fillRect(0, 0, WL, H);
-        ctx.fillRect(W - WL, 0, WL, H);
-
+        // Thin decorative frame
+        const F = 8;
         ctx.strokeStyle = 'rgba(180,120,60,0.55)';
         ctx.lineWidth = 2;
-        ctx.strokeRect(WL, WL, W - WL * 2, H - WL * 2);
-
-        ctx.fillStyle = 'rgba(180,120,60,0.4)';
-        const CA = 10;
-        [[WL, WL], [W - WL, WL], [WL, H - WL], [W - WL, H - WL]].forEach(([cx, cy]) => {
-            ctx.beginPath();
-            ctx.arc(cx, cy, CA, 0, Math.PI * 2);
-            ctx.fill();
-        });
+        ctx.strokeRect(F, F, W - F * 2, H - F * 2);
 
         ctx.fillStyle = 'rgba(220, 38, 38, 0.18)';
         ctx.fillRect(FORBIDDEN.x, FORBIDDEN.y, FORBIDDEN.w, FORBIDDEN.h);
@@ -277,9 +265,9 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         ctx.setLineDash([]);
 
         ctx.fillStyle = 'rgba(220, 38, 38, 0.7)';
-        ctx.font = '11px monospace';
+        ctx.font = 'bold 32px monospace';
         ctx.textAlign = 'center';
-        ctx.fillText('FORBIDDEN', FORBIDDEN.x + FORBIDDEN.w / 2, FORBIDDEN.y + FORBIDDEN.h / 2 + 4);
+        ctx.fillText('FORBIDDEN', FORBIDDEN.x + FORBIDDEN.w / 2, FORBIDDEN.y + FORBIDDEN.h / 2 + 11);
 
         if (this.aimActive && this.canShoot && !this.simulating) {
             const sb = this.shooterBody;
@@ -307,22 +295,6 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         if (p1) this.drawBall(ctx, this.bodies.opponent, p1.color, BALL_R, p1.displayName);
         this.drawBall(ctx, this.bodies.white, '#ffffff', BALL_R, '');
 
-        if (this.canShoot && !this.simulating) {
-            ctx.fillStyle = 'rgba(74,144,226,0.8)';
-            ctx.font = 'bold 13px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('YOUR TURN — click to aim & shoot', W / 2, 22);
-        } else if (!this.canShoot && !this.simulating) {
-            ctx.fillStyle = 'rgba(255,255,255,0.35)';
-            ctx.font = '12px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('Waiting for opponent…', W / 2, 22);
-        } else if (this.simulating) {
-            ctx.fillStyle = 'rgba(255,255,255,0.5)';
-            ctx.font = '12px sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText('…', W / 2, 22);
-        }
     }
 
     private drawBall(ctx: CanvasRenderingContext2D, body: Matter.Body, color: string, r: number, label: string): void {
@@ -390,6 +362,36 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     private inForbidden(pos: { x: number; y: number }): boolean {
         const { x, y, w, h } = ARENA.FORBIDDEN;
         return pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h;
+    }
+
+    private canvasCoords(clientX: number, clientY: number): { x: number; y: number } {
+        const canvas = this.canvasRef.nativeElement;
+        const rect = canvas.getBoundingClientRect();
+
+        // With object-fit: contain the canvas content is letter-boxed.
+        // Compute the rendered content area inside the CSS box.
+        const canvasAspect = canvas.width / canvas.height;
+        const boxAspect = rect.width / rect.height;
+
+        let renderW: number, renderH: number, offsetX: number, offsetY: number;
+        if (canvasAspect > boxAspect) {
+            // pillar-boxed (bars top/bottom)
+            renderW = rect.width;
+            renderH = rect.width / canvasAspect;
+            offsetX = 0;
+            offsetY = (rect.height - renderH) / 2;
+        } else {
+            // letter-boxed (bars left/right)
+            renderH = rect.height;
+            renderW = rect.height * canvasAspect;
+            offsetX = (rect.width - renderW) / 2;
+            offsetY = 0;
+        }
+
+        return {
+            x: ((clientX - rect.left - offsetX) / renderW) * canvas.width,
+            y: ((clientY - rect.top - offsetY) / renderH) * canvas.height,
+        };
     }
 
     private lighten(hex: string, amount: number): string {

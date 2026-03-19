@@ -9,14 +9,52 @@
         <!-- ── Header ── -->
         <header class="game-header">
             <span class="game-title">🎱 Blue Zone</span>
-            <span class="turn-indicator">
-        @if (game.phase === 'PLAYING') {
-            <span class="turn-dot" [style.background]="game.players[game.activePlayerUid]?.color"></span>
-            {{ activeName }}'s turn
-        }
-      </span>
+            <span class="header-spacer"></span>
             <button class="reset-btn" (click)="resetGame()">↺ New Game</button>
+
+            <button class="info-btn" (click)="showRules = !showRules" title="Game rules">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="16" x2="12" y2="12"/>
+                    <line x1="12" y1="8" x2="12.01" y2="8"/>
+                </svg>
+            </button>
+
+            @if (showRules) {
+                <div class="rules-popup">
+                    <div class="rules-popup-header">
+                        <span>Game Rules</span>
+                        <button class="rules-close" (click)="showRules = false">✕</button>
+                    </div>
+                    <ul class="rules-list">
+                        <li>⚪ White ball lands in forbidden zone → opponent gets <strong>+5</strong></li>
+                        <li>🎯 You miss the white ball entirely → opponent gets <strong>+3</strong></li>
+                        <li>💥 Opponent's ball lands in forbidden zone → you get <strong>+5</strong></li>
+                        <li>🏆 First player to reach <strong>21</strong> points wins</li>
+                    </ul>
+                </div>
+            }
         </header>
+
+        <!-- ── Sub-header: player details ── -->
+        <div class="sub-header">
+            @for (player of getPlayerList(); track player.uid) {
+                <div class="player-chip" [class.active]="player.isActive" [class.me]="player.isMe">
+                    <span class="chip-dot" [style.background]="player.color"></span>
+                    <span class="chip-name">
+                        {{ player.name }}
+                        @if (player.isMe) { <em>(you)</em> }
+                    </span>
+                    <span class="chip-score">{{ player.score }}</span>
+                    @if (player.isActive && game.phase === 'PLAYING') {
+                        <span class="chip-turn">●</span>
+                    }
+                </div>
+            }
+
+        </div>
 
         <!-- ── Winner banner ── -->
         @if (winner) {
@@ -33,7 +71,7 @@
             </div>
         }
 
-        <!-- ── Main layout ── -->
+        <!-- ── Arena ── -->
         <main class="game-main">
             <app-arena
                     [game]="game"
@@ -42,33 +80,6 @@
                     (shotFired)="onShotFired($event)"
                     (simulationDone)="onSimulationDone($event)"
             />
-
-            <!-- Score panel -->
-            <aside class="score-panel">
-                <h2 class="score-title">Scores</h2>
-                <div class="score-goal">First to 21 wins</div>
-
-                @for (player of getPlayerList(); track player.uid) {
-                    <div class="score-row" [class.active]="player.isActive" [class.me]="player.isMe">
-                        <span class="score-dot" [style.background]="player.color"></span>
-                        <span class="score-name">
-              {{ player.name }}
-                            @if (player.isMe) { <em>(you)</em> }
-            </span>
-                        <span class="score-value">{{ player.score }}</span>
-
-                        @if (player.isActive && game.phase === 'PLAYING') {
-                            <span class="turn-arrow">◀</span>
-                        }
-                    </div>
-                }
-
-                <div class="rules-box">
-                    <div class="rule">⚪ White in zone → opp +5</div>
-                    <div class="rule">🎯 Miss white → opp +3</div>
-                    <div class="rule">💥 Opp. in zone → you +5</div>
-                </div>
-            </aside>
         </main>
 
     </div>

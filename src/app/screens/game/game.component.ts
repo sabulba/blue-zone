@@ -19,6 +19,7 @@ export class GameComponent implements OnInit, OnDestroy {
 
     game: GameState | null = null;
     statusMessage = '';
+    showRules = false;
     private sub!: Subscription;
 
     ngOnInit(): void {

@@ -4,14 +4,14 @@ import { BallPositions, Shot } from '../models/game.model';
 
 export const ARENA = {
     W: 800,
-    H: 500,
-    WALL: 50,
-    BALL_R: 18,
+    H: 1000,
+    WALL: 10,
+    BALL_R: 36,
     SHOT_FORCE: 0.18,
-    BALL_START_P1: { x: 150, y: 250 },
-    BALL_START_P2: { x: 650, y: 250 },
-    BALL_START_WHITE: { x: 400, y: 250 },
-    FORBIDDEN: { x: 300, y: 390, w: 200, h: 80 },
+    BALL_START_P1: { x: 300, y: 790 },
+    BALL_START_P2: { x: 500, y: 790 },
+    BALL_START_WHITE: { x: 400, y: 620 },
+    FORBIDDEN: { x: 200, y: 26, w: 400, h: 100 },
 } as const;
 
 export interface SimResult {
@@ -118,7 +118,7 @@ export class PhysicsService {
             Matter.Bodies.rectangle(W + WALL / 2, H / 2, WALL, H, wallOpts),
         ];
 
-        const ballOpts: Matter.IBodyDefinition = { restitution: 0.75, friction: 0.005, frictionAir: 0.025 };
+        const ballOpts: Matter.IBodyDefinition = { restitution: 0.75, friction: 0.005, frictionAir: 0.025, density: 0.00025 };
 
         const pShooter = positions[shooterUid] ?? ARENA.BALL_START_P1;
         const pOpponent = positions[opponentUid] ?? ARENA.BALL_START_P2;
