@@ -1,0 +1,75 @@
+@if (!game) {
+    <div class="loading-screen">
+        <div class="spinner"></div>
+        <p>Loading game…</p>
+    </div>
+} @else {
+    <div class="game-page">
+
+        <!-- ── Header ── -->
+        <header class="game-header">
+            <span class="game-title">🎱 Blue Zone</span>
+            <span class="turn-indicator">
+        @if (game.phase === 'PLAYING') {
+            <span class="turn-dot" [style.background]="game.players[game.activePlayerUid]?.color"></span>
+            {{ activeName }}'s turn
+        }
+      </span>
+            <button class="reset-btn" (click)="resetGame()">↺ New Game</button>
+        </header>
+
+        <!-- ── Winner banner ── -->
+        @if (winner) {
+            <div class="winner-banner">
+                🏆 {{ winner }} wins the game!
+                <button class="btn-reset" (click)="resetGame()">Play again</button>
+            </div>
+        }
+
+        <!-- ── Status message ── -->
+        @if (statusMessage) {
+            <div class="status-bar">
+                {{ statusMessage }}
+            </div>
+        }
+
+        <!-- ── Main layout ── -->
+        <main class="game-main">
+            <app-arena
+                    [game]="game"
+                    [myUid]="myUid"
+                    [canShoot]="isMyTurn"
+                    (shotFired)="onShotFired($event)"
+                    (simulationDone)="onSimulationDone($event)"
+            />
+
+            <!-- Score panel -->
+            <aside class="score-panel">
+                <h2 class="score-title">Scores</h2>
+                <div class="score-goal">First to 21 wins</div>
+
+                @for (player of getPlayerList(); track player.uid) {
+                    <div class="score-row" [class.active]="player.isActive" [class.me]="player.isMe">
+                        <span class="score-dot" [style.background]="player.color"></span>
+                        <span class="score-name">
+              {{ player.name }}
+                            @if (player.isMe) { <em>(you)</em> }
+            </span>
+                        <span class="score-value">{{ player.score }}</span>
+
+                        @if (player.isActive && game.phase === 'PLAYING') {
+                            <span class="turn-arrow">◀</span>
+                        }
+                    </div>
+                }
+
+                <div class="rules-box">
+                    <div class="rule">⚪ White in zone → opp +5</div>
+                    <div class="rule">🎯 Miss white → opp +3</div>
+                    <div class="rule">💥 Opp. in zone → you +5</div>
+                </div>
+            </aside>
+        </main>
+
+    </div>
+}

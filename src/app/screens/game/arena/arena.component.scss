@@ -1,0 +1,19 @@
+.arena-wrapper {
+  display: inline-block;
+  border-radius: 0.75rem;
+  overflow: hidden;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.6), 0 0 0 2px rgba(255, 255, 255, 0.08);
+  max-width: 100%;
+}
+
+.arena-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  cursor: crosshair;
+
+  &.my-turn {
+    cursor: crosshair;
+    box-shadow: inset 0 0 0 3px rgba(74, 144, 226, 0.4);
+  }
+}

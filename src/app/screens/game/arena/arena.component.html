@@ -1,0 +1,13 @@
+<div class="arena-wrapper">
+    <canvas
+        #canvas
+        [width]="800"
+        [height]="500"
+        class="arena-canvas"
+        [class.my-turn]="canShoot"
+        (mousemove)="onMouseMove($event)"
+        (mouseleave)="onMouseLeave()"
+        (click)="onCanvasClick($event)"
+        (touchstart)="onTouchStart($event)"
+    ></canvas>
+</div>

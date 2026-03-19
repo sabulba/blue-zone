@@ -1,0 +1,16 @@
+{
+  "hosting": {
+    "public": "dist/blue-zone-game/browser",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}

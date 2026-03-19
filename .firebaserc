@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "default": "fbproject-98e67",
+    "staging": "bluezone-3ceb0"
+  },
+  "targets": {},
+  "etags": {}
+}
