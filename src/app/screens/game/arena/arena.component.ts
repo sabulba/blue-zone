@@ -70,7 +70,7 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         if (changes['canShoot']) {
             console.log('[arena] canShoot:', this.canShoot, 'myUid:', this.myUid,
                 'activePlayerUid:', this.game?.activePlayerUid);
-        if (!this.canShoot) { this.shootPhase = 'idle'; this.shotVelocity = 0; }
+            if (!this.canShoot) { this.shootPhase = 'idle'; this.shotVelocity = 0; }
         }
 
         if (changes['game']) {
@@ -83,11 +83,14 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
             }
 
             if (!shot && curr.ballPositions) {
-                if (!this.simulating) {
-                    this.syncBallPositions(curr.ballPositions);
-                } else {
-                    // Authoritative positions arrived while simulating — buffer them
+                if (this.simulating) {
+                    // Authoritative positions arrived while physics is still running.
+                    // Buffer them — waitForRest will apply them when simulation ends,
+                    // snapping both devices to the exact same final state.
                     this.pendingPositions = curr.ballPositions;
+                } else {
+                    // Not simulating — new game / reset, snap into place immediately.
+                    this.syncBallPositions(curr.ballPositions);
                 }
             }
         }
@@ -252,15 +255,20 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     }
 
     private runShot(shot: Shot): void {
-        // Guard first: if this device fired the shot, the animation is already
-        // running locally. Do NOT sync positions or re-apply force — that would
-        // reset balls mid-simulation when the Firestore snapshot echoes back.
+        // This device fired this shot — physics already running locally, do nothing.
         if (shot.shooterUid === this.myUid) return;
 
-        // Opponent's shot: sync starting positions then replay the physics.
+        // Opponent's shot: reseed engine from the exact positions at fire time
+        // (shot.ballPositions, captured by the shooter before firing).
+        // This guarantees both engines start from identical state each shot,
+        // preventing error accumulation across turns.
         this.syncBallPositions(shot.ballPositions);
-        const shooterBody = this.bodyForUid(shot.shooterUid);
-        this.launchBall(shooterBody, shot.aimX, shot.aimY, shot.force);
+        this.launchBall(
+            this.bodyForUid(shot.shooterUid),
+            shot.aimX,
+            shot.aimY,
+            shot.force,
+        );
         this.waitForRest(shot);
     }
 
@@ -307,12 +315,14 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
                 }
 
                 const newPositions = self.currentBallPositions();
-                const whiteBallInForbidden = self.inForbidden(self.bodies.white.position);
+                const shooterBallInForbidden = self.inForbidden(
+                    self.bodyForUid(shot.shooterUid).position,
+                );
                 const opponentBallInForbidden = self.inForbidden(
                     self.bodyForUid(self.game.playerOrder.find((u) => u !== shot.shooterUid)!).position,
                 );
 
-                const simResult: SimResult = { ballPositions: newPositions, hitWhite, whiteBallInForbidden, opponentBallInForbidden };
+                const simResult: SimResult = { ballPositions: newPositions, hitWhite, shooterBallInForbidden, opponentBallInForbidden };
                 self.zone.run(() => self.simulationDone.emit({ simResult, shot }));
             } else {
                 requestAnimationFrame(check);
@@ -377,7 +387,15 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
             ctx.fill();
         }
 
-        // Velocity badge above ball during swipe
+        const order = this.game.playerOrder;
+        const p0 = this.game.players[order[0]];
+        const p1 = this.game.players[order[1]];
+
+        if (p0) this.drawBall(ctx, this.bodies.shooter, p0.color, BALL_R, p0.displayName);
+        if (p1) this.drawBall(ctx, this.bodies.opponent, p1.color, BALL_R, p1.displayName);
+        this.drawBall(ctx, this.bodies.white, '#ffffff', BALL_R, '');
+
+        // Velocity badge above ball during swipe (drawn last = on top of everything)
         if (this.shootPhase === 'swiping' && this.shotVelocity > 0) {
             const ball = this.shooterBody;
             const bx = ball.position.x;
@@ -400,14 +418,6 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
             ctx.fillText(velText, bx, by);
             ctx.textBaseline = 'alphabetic';
         }
-
-        const order = this.game.playerOrder;
-        const p0 = this.game.players[order[0]];
-        const p1 = this.game.players[order[1]];
-
-        if (p0) this.drawBall(ctx, this.bodies.shooter, p0.color, BALL_R, p0.displayName);
-        if (p1) this.drawBall(ctx, this.bodies.opponent, p1.color, BALL_R, p1.displayName);
-        this.drawBall(ctx, this.bodies.white, '#ffffff', BALL_R, '');
 
     }
 
@@ -451,6 +461,49 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         return uid === this.game.playerOrder[0] ? this.bodies.shooter : this.bodies.opponent;
     }
 
+    // Smoothly animate balls from their current positions to the authoritative
+    // final positions received from Firestore. Used on the watcher's device
+    // instead of replaying Matter.js physics, eliminating determinism drift.
+    private tweenToPositions(target: BallPositions): void {
+        const DURATION = 700; // ms — feels like a natural roll to rest
+        const start = performance.now();
+        const from = this.currentBallPositions();
+        const order = this.game.playerOrder;
+
+        const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+        // Ease-in-out quad — accelerates then decelerates like a real ball
+        const ease = (t: number): number => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+
+        const self = this;
+        const animate = (now: number) => {
+            const raw = Math.min((now - start) / DURATION, 1);
+            const t   = ease(raw);
+
+            Matter.Body.setPosition(self.bodies.shooter, {
+                x: lerp(from[order[0]].x, target[order[0]].x, t),
+                y: lerp(from[order[0]].y, target[order[0]].y, t),
+            });
+            Matter.Body.setPosition(self.bodies.opponent, {
+                x: lerp(from[order[1]].x, target[order[1]].x, t),
+                y: lerp(from[order[1]].y, target[order[1]].y, t),
+            });
+            Matter.Body.setPosition(self.bodies.white, {
+                x: lerp(from['white'].x, target['white'].x, t),
+                y: lerp(from['white'].y, target['white'].y, t),
+            });
+
+            if (raw < 1) {
+                requestAnimationFrame(animate);
+            } else {
+                // Snap to exact final positions to clear any floating-point residue
+                self.syncBallPositions(target);
+                self.simulating = false;
+                self.pendingPositions = null;
+            }
+        };
+        requestAnimationFrame(animate);
+    }
+
     private syncBallPositions(positions: BallPositions): void {
         const order = this.game.playerOrder;
         const p0 = positions[order[0]];
@@ -466,16 +519,21 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
 
     private currentBallPositions(): BallPositions {
         const order = this.game.playerOrder;
+        const r = (n: number) => Math.round(n * 1000) / 1000; // 3dp — eliminates sub-pixel noise
         return {
-            [order[0]]: { x: this.bodies.shooter.position.x, y: this.bodies.shooter.position.y },
-            [order[1]]: { x: this.bodies.opponent.position.x, y: this.bodies.opponent.position.y },
-            white: { x: this.bodies.white.position.x, y: this.bodies.white.position.y },
+            [order[0]]: { x: r(this.bodies.shooter.position.x),  y: r(this.bodies.shooter.position.y) },
+            [order[1]]: { x: r(this.bodies.opponent.position.x), y: r(this.bodies.opponent.position.y) },
+            white:      { x: r(this.bodies.white.position.x),    y: r(this.bodies.white.position.y) },
         };
     }
 
+    /** Ball counts as "in zone" if ≥50% overlaps (center within zone boundary). */
     private inForbidden(pos: { x: number; y: number }): boolean {
         const { x, y, w, h } = ARENA.FORBIDDEN;
-        return pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h;
+        const cx = Math.max(x, Math.min(x + w, pos.x));
+        const cy = Math.max(y, Math.min(y + h, pos.y));
+        const dist = Math.hypot(pos.x - cx, pos.y - cy);
+        return dist <= ARENA.BALL_R * 0.05;
     }
 
     private canvasCoords(clientX: number, clientY: number): { x: number; y: number } {

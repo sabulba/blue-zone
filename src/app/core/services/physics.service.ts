@@ -2,25 +2,32 @@ import { Injectable } from '@angular/core';
 import Matter from 'matter-js';
 import { BallPositions, Shot } from '../models/game.model';
 
+const _W = 800;
+const _H = 1000;
+const _WALL_INSET = 8;
+const _BALL_R = 72;
+const _FW = Math.round(_W * 0.625);          // danger zone width  (responsive)
+const _FH = Math.round(_H * 0.2);            // danger zone height (responsive)
+
 export const ARENA = {
-    W: 800,
-    H: 1000,
+    W: _W,
+    H: _H,
     WALL: 50,
-    WALL_INSET: 8,      // walls align with decorative frame inset
-    BALL_R: 72,
+    WALL_INSET: _WALL_INSET,
+    BALL_R: _BALL_R,
     MAX_VELOCITY: 40,
     MIN_VELOCITY: 4,
     SWIPE_SCALE: 0.12,
-    BALL_START_P1: { x: 300, y: 790 },
-    BALL_START_P2: { x: 500, y: 790 },
-    BALL_START_WHITE: { x: 400, y: 620 },
-    FORBIDDEN: { x: 200, y: 26, w: 400, h: 100 },
+    BALL_START_P1:    { x: _WALL_INSET + _BALL_R,       y: _H - _WALL_INSET - _BALL_R },
+    BALL_START_P2:    { x: _W - _WALL_INSET - _BALL_R,  y: _H - _WALL_INSET - _BALL_R },
+    BALL_START_WHITE: { x: _W / 2,                       y: Math.round(_H * 0.62) },
+    FORBIDDEN:        { x: Math.round((_W - _FW) / 2),  y: _WALL_INSET + 18, w: _FW, h: _FH },
 } as const;
 
 export interface SimResult {
     ballPositions: BallPositions;
     hitWhite: boolean;
-    whiteBallInForbidden: boolean;
+    shooterBallInForbidden: boolean;
     opponentBallInForbidden: boolean;
 }
 
@@ -73,20 +80,21 @@ export class PhysicsService {
         }
 
         const ballPositions = this.extractPositions(bodies, shooterUid, opponentUid);
-        const whiteBallInForbidden = this.inForbidden(bodies.white.position);
+        const shooterBallInForbidden = this.inForbidden(bodies.shooter.position);
         const opponentBallInForbidden = this.inForbidden(bodies.opponent.position);
         Matter.Engine.clear(engine);
 
-        return { ballPositions, hitWhite, whiteBallInForbidden, opponentBallInForbidden };
+        return { ballPositions, hitWhite, shooterBallInForbidden, opponentBallInForbidden };
     }
 
     // Returns ScoreResult — no negative values, penalties go to opponent as points.
     //
     // Rules:
-    //   Miss white ball        → opponent +3
-    //   Opponent ball in danger zone → active player +5
+    //   Miss white ball                 → opponent +3
+    //   Opponent ball in danger zone     → active player +5
+    //   Shooter’s own ball in danger zone → opponent +5 (penalty)
     evaluateScore(
-        result: Pick<SimResult, 'hitWhite' | 'whiteBallInForbidden' | 'opponentBallInForbidden'>,
+        result: Pick<SimResult, 'hitWhite' | 'shooterBallInForbidden' | 'opponentBallInForbidden'>,
     ): ScoreResult {
         let activePoints = 0;
         let opponentPoints = 0;
@@ -97,6 +105,10 @@ export class PhysicsService {
 
         if (result.opponentBallInForbidden) {
             activePoints += 5;              // reward stays with active player
+        }
+
+        if (result.shooterBallInForbidden) {
+            opponentPoints += 5;            // penalty → opponent reward
         }
 
         return { activePoints, opponentPoints };
@@ -133,9 +145,16 @@ export class PhysicsService {
         return { engine, bodies: { shooter, opponent, white } };
     }
 
+    /** Ball counts as "in zone" if ≥50% overlaps (center within zone boundary). */
     private inForbidden(pos: { x: number; y: number }): boolean {
         const { x, y, w, h } = ARENA.FORBIDDEN;
-        return pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h;
+        // Clamp center to nearest point on the zone rectangle
+        const cx = Math.max(x, Math.min(x + w, pos.x));
+        const cy = Math.max(y, Math.min(y + h, pos.y));
+        const dist = Math.hypot(pos.x - cx, pos.y - cy);
+        // dist === 0 means center is inside the zone (≥ 50% overlap).
+        // Allow a small tolerance so balls resting right at the edge count.
+        return dist <= ARENA.BALL_R * 0.05;
     }
 
     private extractPositions(bodies: ArenaBodies, shooterUid: string, opponentUid: string): BallPositions {
