@@ -83,14 +83,11 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
             }
 
             if (!shot && curr.ballPositions) {
-                if (this.simulating) {
-                    // Authoritative positions arrived while physics is still running.
-                    // Buffer them — waitForRest will apply them when simulation ends,
-                    // snapping both devices to the exact same final state.
-                    this.pendingPositions = curr.ballPositions;
-                } else {
-                    // Not simulating — new game / reset, snap into place immediately.
+                if (!this.simulating) {
                     this.syncBallPositions(curr.ballPositions);
+                } else {
+                    // Authoritative positions arrived while simulating — buffer them
+                    this.pendingPositions = curr.ballPositions;
                 }
             }
         }
@@ -255,20 +252,15 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     }
 
     private runShot(shot: Shot): void {
-        // This device fired this shot — physics already running locally, do nothing.
+        // Guard first: if this device fired the shot, the animation is already
+        // running locally. Do NOT sync positions or re-apply force — that would
+        // reset balls mid-simulation when the Firestore snapshot echoes back.
         if (shot.shooterUid === this.myUid) return;
 
-        // Opponent's shot: reseed engine from the exact positions at fire time
-        // (shot.ballPositions, captured by the shooter before firing).
-        // This guarantees both engines start from identical state each shot,
-        // preventing error accumulation across turns.
+        // Opponent's shot: sync starting positions then replay the physics.
         this.syncBallPositions(shot.ballPositions);
-        this.launchBall(
-            this.bodyForUid(shot.shooterUid),
-            shot.aimX,
-            shot.aimY,
-            shot.force,
-        );
+        const shooterBody = this.bodyForUid(shot.shooterUid);
+        this.launchBall(shooterBody, shot.aimX, shot.aimY, shot.force);
         this.waitForRest(shot);
     }
 
@@ -358,16 +350,30 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         ctx.textAlign = 'center';
         ctx.fillText('DANGER', FORBIDDEN.x + FORBIDDEN.w / 2, FORBIDDEN.y + FORBIDDEN.h / 2 + 11);
 
-        // Pulsing ring around own ball when target is placed (tap-here hint)
-        if (this.shootPhase === 'target-placed' && this.canShoot) {
+        // Blinking highlight on the active ball — always visible on your turn.
+        // Outer ring: slow breathe (1.2s cycle). Inner ring: faster pulse (0.5s).
+        if (this.canShoot && !this.simulating) {
             const ball = this.shooterBody;
-            const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+            const t = Date.now();
+
+            // Outer slow breathe
+            const outerPulse = 0.5 + 0.5 * Math.sin(t / 600);
             ctx.setLineDash([]);
             ctx.beginPath();
-            ctx.arc(ball.position.x, ball.position.y, BALL_R + 8 + pulse * 6, 0, Math.PI * 2);
-            ctx.strokeStyle = `rgba(255, 220, 0, ${(0.4 + pulse * 0.4).toFixed(2)})`;
-            ctx.lineWidth = 3;
+            ctx.arc(ball.position.x, ball.position.y, BALL_R + 10 + outerPulse * 8, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 220, 0, ${(0.2 + outerPulse * 0.5).toFixed(2)})`;
+            ctx.lineWidth = 2.5;
             ctx.stroke();
+
+            // Inner fast blink — only when idle (prompts player to tap)
+            if (this.shootPhase === 'idle') {
+                const innerPulse = 0.5 + 0.5 * Math.sin(t / 250);
+                ctx.beginPath();
+                ctx.arc(ball.position.x, ball.position.y, BALL_R + 4 + innerPulse * 3, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(255, 255, 255, ${(0.3 + innerPulse * 0.5).toFixed(2)})`;
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
         }
 
         // Target marker (yellow circle + red center dot)
@@ -445,7 +451,13 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
             ctx.font = `bold ${Math.max(9, r * 0.7)}px sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(label.slice(0, 3), x, y);
+            // Show "P1"/"P2" by extracting the last word/number from displayName.
+            // "Player 1" → "P1", "Player 2" → "P2", any other name → first 2 chars.
+            const parts = label.trim().split(/\s+/);
+            const short = parts.length > 1
+                ? parts[0][0] + parts[parts.length - 1]   // "P" + "1" → "P1"
+                : label.slice(0, 2);                        // fallback
+            ctx.fillText(short, x, y);
             ctx.textBaseline = 'alphabetic';
         }
     }
@@ -459,49 +471,6 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         if (this.bodies.opponent.label === uid) return this.bodies.opponent;
         // fallback
         return uid === this.game.playerOrder[0] ? this.bodies.shooter : this.bodies.opponent;
-    }
-
-    // Smoothly animate balls from their current positions to the authoritative
-    // final positions received from Firestore. Used on the watcher's device
-    // instead of replaying Matter.js physics, eliminating determinism drift.
-    private tweenToPositions(target: BallPositions): void {
-        const DURATION = 700; // ms — feels like a natural roll to rest
-        const start = performance.now();
-        const from = this.currentBallPositions();
-        const order = this.game.playerOrder;
-
-        const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
-        // Ease-in-out quad — accelerates then decelerates like a real ball
-        const ease = (t: number): number => t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-
-        const self = this;
-        const animate = (now: number) => {
-            const raw = Math.min((now - start) / DURATION, 1);
-            const t   = ease(raw);
-
-            Matter.Body.setPosition(self.bodies.shooter, {
-                x: lerp(from[order[0]].x, target[order[0]].x, t),
-                y: lerp(from[order[0]].y, target[order[0]].y, t),
-            });
-            Matter.Body.setPosition(self.bodies.opponent, {
-                x: lerp(from[order[1]].x, target[order[1]].x, t),
-                y: lerp(from[order[1]].y, target[order[1]].y, t),
-            });
-            Matter.Body.setPosition(self.bodies.white, {
-                x: lerp(from['white'].x, target['white'].x, t),
-                y: lerp(from['white'].y, target['white'].y, t),
-            });
-
-            if (raw < 1) {
-                requestAnimationFrame(animate);
-            } else {
-                // Snap to exact final positions to clear any floating-point residue
-                self.syncBallPositions(target);
-                self.simulating = false;
-                self.pendingPositions = null;
-            }
-        };
-        requestAnimationFrame(animate);
     }
 
     private syncBallPositions(positions: BallPositions): void {
@@ -519,11 +488,10 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
 
     private currentBallPositions(): BallPositions {
         const order = this.game.playerOrder;
-        const r = (n: number) => Math.round(n * 1000) / 1000; // 3dp — eliminates sub-pixel noise
         return {
-            [order[0]]: { x: r(this.bodies.shooter.position.x),  y: r(this.bodies.shooter.position.y) },
-            [order[1]]: { x: r(this.bodies.opponent.position.x), y: r(this.bodies.opponent.position.y) },
-            white:      { x: r(this.bodies.white.position.x),    y: r(this.bodies.white.position.y) },
+            [order[0]]: { x: this.bodies.shooter.position.x, y: this.bodies.shooter.position.y },
+            [order[1]]: { x: this.bodies.opponent.position.x, y: this.bodies.opponent.position.y },
+            white: { x: this.bodies.white.position.x, y: this.bodies.white.position.y },
         };
     }
 
