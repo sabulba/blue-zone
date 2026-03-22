@@ -1,7 +1,18 @@
 import { Routes } from '@angular/router';
-import { GameComponent } from './screens/game/game.component';
+import { authGuard } from './core/guards/auth.guard';
 
 export const routes: Routes = [
-  { path: '', component: GameComponent },
-  { path: '**', redirectTo: '' },
+  {
+    path: 'auth',
+    loadComponent: () =>
+      import('./screens/auth/auth.component').then((m) => m.AuthComponent),
+  },
+  {
+    path: 'game',
+    loadComponent: () =>
+      import('./screens/game/game.component').then((m) => m.GameComponent),
+    canActivate: [authGuard],
+  },
+  { path: '', redirectTo: 'auth', pathMatch: 'full' },
+  { path: '**', redirectTo: 'auth' },
 ];

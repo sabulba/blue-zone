@@ -2,6 +2,7 @@ import { ApplicationConfig } from '@angular/core';
 import { provideRouter } from '@angular/router';
 import { provideFirebaseApp, initializeApp } from '@angular/fire/app';
 import { provideFirestore, getFirestore } from '@angular/fire/firestore';
+import { provideAuth, getAuth } from '@angular/fire/auth';
 import { routes } from './app.routes';
 
 const firebaseConfig = {
@@ -13,10 +14,12 @@ const firebaseConfig = {
     appId: "1:257776057750:web:784cb47a1bbc428d8771b7",
     measurementId: "G-SJJRS2MJ56"
 };
+
 export const appConfig: ApplicationConfig = {
   providers: [
-      provideRouter(routes),
-      provideFirebaseApp(() => initializeApp(firebaseConfig)),
-      provideFirestore(() => getFirestore()),
+    provideRouter(routes),
+    provideFirebaseApp(() => initializeApp(firebaseConfig)),
+    provideFirestore(() => getFirestore()),
+    provideAuth(() => getAuth()),
   ]
 };

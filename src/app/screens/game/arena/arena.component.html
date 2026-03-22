@@ -1,13 +1,13 @@
 <div class="arena-wrapper">
-    <canvas
-        #canvas
-        [width]="arenaW"
-        [height]="arenaH"
-        class="arena-canvas"
-        [class.my-turn]="canShoot"
-        (pointerdown)="onPointerDown($event)"
-        (pointermove)="onPointerMove($event)"
-        (pointerup)="onPointerUp()"
-        (pointerleave)="onPointerUp()"
-    ></canvas>
+  <canvas
+    #canvas
+    [width]="arenaW"
+    [height]="arenaH"
+    class="arena-canvas"
+    [class.my-turn]="canShoot"
+    (pointerdown)="onPointerDown($event)"
+    (pointermove)="onPointerMove($event)"
+    (pointerup)="onPointerUp()"
+    (pointerleave)="onPointerUp()"
+  ></canvas>
 </div>

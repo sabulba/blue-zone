@@ -1,204 +1,167 @@
 import { Injectable, OnDestroy, inject, Injector, NgZone, runInInjectionContext } from '@angular/core';
 import {
-    Firestore,
-    doc,
-    getDoc,
-    setDoc,
-    onSnapshot,
-    updateDoc,
-    DocumentSnapshot,
+  Firestore, doc, getDoc, setDoc, onSnapshot, updateDoc, DocumentSnapshot,
 } from '@angular/fire/firestore';
 import { BehaviorSubject, Observable } from 'rxjs';
 import { BallPositions, GameState, PlayerData, Shot } from '../models/game.model';
 import { ARENA, ScoreResult } from './physics.service';
+import { AuthService } from './auth.service';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+const WIN_SCORE    = 21;
+const GAME_ID      = 'shared-game';
+const COLORS       = ['#3498db', '#e74c3c'];
+const P1_KEY       = 'player_1';
+const P2_KEY       = 'player_2';
 
-const WIN_SCORE = 21;
-
-// Hardcoded players — no auth/lobby needed for now.
-// Phone A always plays as player_1, Phone B as player_2.
-const PLAYER_1: PlayerData = { uid: 'player_1', displayName: 'Player 1', color: '#3498db', score: 0 };
-const PLAYER_2: PlayerData = { uid: 'player_2', displayName: 'Player 2', color: '#e74c3c', score: 0 };
-
-function defaultBallPositions(): BallPositions {
-    return {
-        [PLAYER_1.uid]: { ...ARENA.BALL_START_P1 },
-        [PLAYER_2.uid]: { ...ARENA.BALL_START_P2 },
-        white: { ...ARENA.BALL_START_WHITE },
-    };
+function freshPositions(): BallPositions {
+  return {
+    [P1_KEY]: { ...ARENA.BALL_START_P1 },
+    [P2_KEY]: { ...ARENA.BALL_START_P2 },
+    white:    { ...ARENA.BALL_START_WHITE },
+  };
 }
 
-// ── Service ───────────────────────────────────────────────────────────────────
+function freshGame(p1Name: string, p2Name: string): GameState {
+  return {
+    gameId:          GAME_ID,
+    createdAt:       Date.now(),
+    phase:           'PLAYING',
+    activePlayerUid: P1_KEY,
+    playerOrder:     [P1_KEY, P2_KEY],
+    players: {
+      [P1_KEY]: { uid: P1_KEY, displayName: p1Name, color: COLORS[0], score: 0 },
+      [P2_KEY]: { uid: P2_KEY, displayName: p2Name, color: COLORS[1], score: 0 },
+    },
+    lastShot:      null,
+    ballPositions: freshPositions(),
+  };
+}
 
 @Injectable({ providedIn: 'root' })
 export class FirebaseGameService implements OnDestroy {
-    private firestore = inject(Firestore);
-    private injector  = inject(Injector);
-    private zone      = inject(NgZone);
+  private firestore = inject(Firestore);
+  private injector  = inject(Injector);
+  private zone      = inject(NgZone);
+  private authSvc   = inject(AuthService);
 
-    private _state$ = new BehaviorSubject<GameState | null>(null);
-    readonly state$: Observable<GameState | null> = this._state$.asObservable();
+  private _state$ = new BehaviorSubject<GameState | null>(null);
+  readonly state$: Observable<GameState | null> = this._state$.asObservable();
 
-    // Fixed per-device identity.
-    // Phone A (default):  open normally           → player_1
-    // Phone B:            open with ?player=2     → player_2
-    readonly myUid: string = new URLSearchParams(window.location.search).get('player') === '2'
-        ? PLAYER_2.uid
-        : PLAYER_1.uid;
+  private unsubSnap: (() => void) | null = null;
 
-    private gameId: string | null = null;
-    private unsubscribeSnapshot: (() => void) | null = null;
+  get state(): GameState | null { return this._state$.value; }
 
-    get state(): GameState | null { return this._state$.value; }
+  // ── myUid: this device's fixed slot ────────────────────────────────────────
+  // On two devices: first to open = player_1, second = player_2.
+  // On single device: returns activePlayerUid so current player can shoot.
+  get myUid(): string {
+    const slot = localStorage.getItem('bluezone_slot');
+    if (slot) return slot;
+    // Fallback: single device — active player is "me"
+    return this._state$.value?.activePlayerUid ?? P1_KEY;
+  }
 
-    // ── Create or join the shared game ───────────────────────────────────────
-    // Uses a fixed well-known gameId so both phones always share the same doc
-    // without any invite/lobby flow. If the doc doesn't exist yet, creates it.
-    // If it already exists (other phone already started it), just subscribes.
-    async createGame(): Promise<string> {
-        const SHARED_GAME_ID = 'shared-game';
-        this.gameId = SHARED_GAME_ID;
+  // ── mySlot: which fixed slot this device owns ─────────────────────────────
+  // Stored in localStorage so it survives page refresh.
+  // First device to open the game = player_1, second = player_2.
+  get mySlot(): string {
+    return localStorage.getItem('bluezone_slot') ?? '';
+  }
 
-        return runInInjectionContext(this.injector, async () => {
-            const gameRef = doc(this.firestore, 'games', SHARED_GAME_ID);
-            const snap = await getDoc(gameRef);
+  // ── init: called once from GameComponent.ngOnInit ─────────────────────────
+  async init(): Promise<void> {
+    const name = this.authSvc.displayName || 'Player';
+    await runInInjectionContext(this.injector, async () => {
+      const ref  = doc(this.firestore, 'games', GAME_ID);
+      const snap = await getDoc(ref);
 
-            // Emit immediately from getDoc so the loading screen
-            // disappears without waiting for the first onSnapshot round-trip.
-            if (snap.exists()) {
-                this.zone.run(() => this._state$.next(snap.data() as GameState));
-            }
+      if (!snap.exists()) {
+        // First device — claim player_1, create game
+        localStorage.setItem('bluezone_slot', P1_KEY);
+        await setDoc(ref, freshGame(name, 'Player 2'));
+      } else {
+        const data = snap.data() as GameState;
+        // Detect which slot this device owns
+        let slot = localStorage.getItem('bluezone_slot');
 
-            if (!snap.exists()) {
-                const initialState: GameState = {
-                    gameId: SHARED_GAME_ID,
-                    createdAt: Date.now(),
-                    phase: 'PLAYING',
-                    activePlayerUid: PLAYER_1.uid,
-                    playerOrder: [PLAYER_1.uid, PLAYER_2.uid],
-                    players: {
-                        [PLAYER_1.uid]: { ...PLAYER_1 },
-                        [PLAYER_2.uid]: { ...PLAYER_2 },
-                    },
-                    lastShot: null,
-                    ballPositions: defaultBallPositions(),
-                };
-                await setDoc(gameRef, initialState);
-                this.zone.run(() => this._state$.next(initialState));
-            }
+        if (!slot) {
+          // New device joining — take whichever slot has generic name, prefer P2
+          const p2Name = data.players[P2_KEY]?.displayName ?? '';
+          slot = (p2Name === 'Player 2' || p2Name === '') ? P2_KEY : P1_KEY;
+          localStorage.setItem('bluezone_slot', slot);
+        }
 
-            this._watchGame(SHARED_GAME_ID);
-            return SHARED_GAME_ID;
+        // Write real auth name into our slot
+        await updateDoc(ref, {
+          [`players.${slot}.displayName`]: name,
         });
-    }
+      }
 
-    // ── Join existing game ─────────────────────────────────────────────────────
-    // Called when Phone B opens the app with a known gameId.
-    // No write needed — players are already in the doc from createGame().
-    joinGame(gameId: string): void {
-        this.gameId = gameId;
-        this._watchGame(gameId);
-    }
+      const gs = (await getDoc(ref)).data() as GameState;
+      this.zone.run(() => this._state$.next(gs));
+      this._watch();
+    });
+  }
 
-    // ── Reset ──────────────────────────────────────────────────────────────────
-    // Overwrites the shared doc with a fresh initial state.
-    async reset(): Promise<string> {
-        this._stopWatching();
-        const SHARED_GAME_ID = 'shared-game';
-        this.gameId = SHARED_GAME_ID;
-        return runInInjectionContext(this.injector, async () => {
-            const gameRef = doc(this.firestore, 'games', SHARED_GAME_ID);
-            const freshState: GameState = {
-                gameId: SHARED_GAME_ID,
-                createdAt: Date.now(),
-                phase: 'PLAYING',
-                activePlayerUid: PLAYER_1.uid,
-                playerOrder: [PLAYER_1.uid, PLAYER_2.uid],
-                players: {
-                    [PLAYER_1.uid]: { ...PLAYER_1 },
-                    [PLAYER_2.uid]: { ...PLAYER_2 },
-                },
-                lastShot: null,
-                ballPositions: defaultBallPositions(),
-            };
-            await setDoc(gameRef, freshState);
-            // Emit immediately — don't wait for onSnapshot round-trip
-            this.zone.run(() => this._state$.next(freshState));
-            this._watchGame(SHARED_GAME_ID);
-            return SHARED_GAME_ID;
-        });
-    }
+  // ── reset ─────────────────────────────────────────────────────────────────
+  async reset(): Promise<void> {
+    const game = this._state$.value;
+    await runInInjectionContext(this.injector, async () => {
+      const ref = doc(this.firestore, 'games', GAME_ID);
+      // Preserve real player names, just reset scores and positions
+      const p1Name = game?.players[P1_KEY]?.displayName ?? 'Player 1';
+      const p2Name = game?.players[P2_KEY]?.displayName ?? 'Player 2';
+      const gs  = freshGame(p1Name, p2Name);
+      await setDoc(ref, gs);
+      this.zone.run(() => this._state$.next(gs));
+    });
+  }
 
-    // ── submitShot ─────────────────────────────────────────────────────────────
-    // Active player writes their shot to Firestore.
-    // Phone B's onSnapshot fires and it replays the same shot locally.
-    async submitShot(shot: Shot): Promise<void> {
-        if (!this.gameId) return;
-        await runInInjectionContext(this.injector, async () => {
-            await updateDoc(doc(this.firestore, 'games', this.gameId!), { lastShot: shot });
-        });
-    }
+  // ── submitShot ─────────────────────────────────────────────────────────────
+  async submitShot(shot: Shot): Promise<void> {
+    await runInInjectionContext(this.injector, async () => {
+      await updateDoc(doc(this.firestore, 'games', GAME_ID), { lastShot: shot });
+    });
+  }
 
-    // ── updateAfterShot ────────────────────────────────────────────────────────
-    // Called ONLY by the active player after their local physics simulation ends.
-    // Writes the final ball positions, updated scores, and next active player.
-    // Phone B reads this via onSnapshot and updates its own state — it never
-    // calls this method itself.
-    async updateAfterShot(score: ScoreResult, newBallPositions: BallPositions, shooterUid?: string): Promise<void> {
-        if (!this.gameId || !this._state$.value) return;
+  // ── updateAfterShot ────────────────────────────────────────────────────────
+  async updateAfterShot(score: ScoreResult, newPos: BallPositions, shooterUid?: string): Promise<void> {
+    const game = this._state$.value;
+    if (!game) return;
 
-        const game = this._state$.value;
-        // Use shooterUid when provided — activePlayerUid in state may have already
-        // been updated by a snapshot that arrived during the physics simulation.
-        const activeUid = shooterUid ?? game.activePlayerUid;
-        const opponentUid = game.playerOrder.find((uid) => uid !== activeUid)!;
-        console.log('[updateAfterShot] activeUid:', activeUid, '→ next:', opponentUid);
+    const activeUid   = shooterUid ?? game.activePlayerUid;
+    const opponentUid = game.playerOrder.find(u => u !== activeUid)!;
 
-        const newActiveScore   = (game.players[activeUid]?.score   ?? 0) + score.activePoints;
-        const newOpponentScore = (game.players[opponentUid]?.score ?? 0) + score.opponentPoints;
+    const newActiveScore   = (game.players[activeUid]?.score   ?? 0) + score.activePoints;
+    const newOpponentScore = (game.players[opponentUid]?.score ?? 0) + score.opponentPoints;
+    const isGameOver = newActiveScore >= WIN_SCORE || newOpponentScore >= WIN_SCORE;
+    const winnerUid  = newActiveScore >= WIN_SCORE ? activeUid : opponentUid;
 
-        const isGameOver = newActiveScore >= WIN_SCORE || newOpponentScore >= WIN_SCORE;
-        const winnerUid  = newActiveScore >= WIN_SCORE ? activeUid : opponentUid;
+    await runInInjectionContext(this.injector, async () => {
+      await updateDoc(doc(this.firestore, 'games', GAME_ID), {
+        ballPositions:   newPos,
+        players: {
+          ...game.players,
+          [activeUid]:   { ...game.players[activeUid],   score: newActiveScore },
+          [opponentUid]: { ...game.players[opponentUid], score: newOpponentScore },
+        },
+        activePlayerUid: isGameOver ? winnerUid : opponentUid,
+        phase:           isGameOver ? 'ENDED' : 'PLAYING',
+        lastShot:        null,
+      });
+    });
+  }
 
-        await runInInjectionContext(this.injector, async () => {
-            await updateDoc(doc(this.firestore, 'games', this.gameId!), {
-                ballPositions: newBallPositions,
-                players: {
-                    ...game.players,
-                    [activeUid]:   { ...game.players[activeUid],   score: newActiveScore },
-                    [opponentUid]: { ...game.players[opponentUid], score: newOpponentScore },
-                },
-                activePlayerUid: isGameOver ? winnerUid : opponentUid,
-                phase: isGameOver ? 'ENDED' : 'PLAYING',
-                lastShot: null,
-            });
-            console.log('[updateAfterShot] Firestore write complete, next active:', isGameOver ? winnerUid : opponentUid);
-        });
-    }
+  private _watch(): void {
+    this.unsubSnap?.();
+    this.unsubSnap = runInInjectionContext(this.injector, () =>
+      onSnapshot(doc(this.firestore, 'games', GAME_ID), (snap: DocumentSnapshot) => {
+        if (snap.exists()) {
+          this.zone.run(() => this._state$.next(snap.data() as GameState));
+        }
+      })
+    );
+  }
 
-    // ── Internal: Firestore snapshot listener ──────────────────────────────────
-
-    private _watchGame(gameId: string): void {
-        this._stopWatching();
-        this.unsubscribeSnapshot = runInInjectionContext(this.injector, () =>
-            onSnapshot(
-                doc(this.firestore, 'games', gameId),
-                (snap: DocumentSnapshot) => {
-                    if (snap.exists()) {
-                        this.zone.run(() => this._state$.next(snap.data() as GameState));
-                    }
-                },
-            )
-        );
-    }
-
-    private _stopWatching(): void {
-        this.unsubscribeSnapshot?.();
-        this.unsubscribeSnapshot = null;
-    }
-
-    ngOnDestroy(): void {
-        this._stopWatching();
-    }
+  ngOnDestroy(): void { this.unsubSnap?.(); }
 }

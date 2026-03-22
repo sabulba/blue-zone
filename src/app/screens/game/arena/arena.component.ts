@@ -32,7 +32,6 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
 
     @Input() game!: GameState;
     @Input() myUid!: string;
-    @Input() canShoot = false;   // set by GameComponent: isMyTurn = myUid === activePlayerUid
     @Output() shotFired = new EventEmitter<Shot>();
     @Output() simulationDone = new EventEmitter<ShotResult>();
 
@@ -47,6 +46,7 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     private rafId = 0;
     private simulating = false;
     private lastShotTimestamp = 0;
+    private localFiredTimestamp = 0; // timestamp of shot fired by THIS device
 
     // Shooting state machine: idle → target-placed → swiping → (fire) → idle
     private shootPhase: 'idle' | 'target-placed' | 'swiping' = 'idle';
@@ -67,14 +67,12 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     ngOnChanges(changes: SimpleChanges): void {
         if (!this.engine) return;
 
-        if (changes['canShoot']) {
-            console.log('[arena] canShoot:', this.canShoot, 'myUid:', this.myUid,
-                'activePlayerUid:', this.game?.activePlayerUid);
-            if (!this.canShoot) { this.shootPhase = 'idle'; this.shotVelocity = 0; }
-        }
+
 
         if (changes['game']) {
             const curr = changes['game'].currentValue as GameState;
+            // Reset aim state when it's no longer this device's turn
+            if (!this.isMyTurn) { this.shootPhase = 'idle'; this.shotVelocity = 0; }
             const shot = curr.lastShot;
 
             if (shot && shot.timestamp !== this.lastShotTimestamp && !this.simulating) {
@@ -157,8 +155,14 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         this.shotVelocity = 0;
     }
 
-    // isMyTurn is used only for the aim-line rendering in draw().
-    // All shot-firing is gated by canShoot, which is controlled by GameComponent.
+    // canShoot: computed internally — no parent input needed
+    // True whenever the game is PLAYING and physics is idle.
+    // On single device both players share screen so always enabled during PLAYING.
+    // On two devices myUid matches activePlayerUid for the correct device.
+    get canShoot(): boolean {
+        return this.game?.phase === 'PLAYING' && !this.simulating;
+    }
+
     get isMyTurn(): boolean {
         return this.game?.activePlayerUid === this.myUid && this.game?.phase === 'PLAYING';
     }
@@ -237,25 +241,25 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
     private fireShot(): void {
         const shooterBody = this.shooterBody;
         const vel = this.shotVelocity;
-        console.log('[fire] myUid:', this.myUid, 'vel:', vel, 'target:', this.targetX, this.targetY);
+        const activeUid = this.game.activePlayerUid;
         const shot: Shot = {
-            shooterUid: this.myUid,
+            shooterUid: activeUid,
             aimX: this.targetX,
             aimY: this.targetY,
             force: vel,           // reuse field for velocity magnitude
             ballPositions: this.currentBallPositions(),
             timestamp: Date.now(),
         };
+        this.localFiredTimestamp = shot.timestamp; // mark as locally fired
         this.shotFired.emit(shot);
         this.launchBall(shooterBody, this.targetX, this.targetY, vel);
         this.waitForRest(shot);
     }
 
     private runShot(shot: Shot): void {
-        // Guard first: if this device fired the shot, the animation is already
-        // running locally. Do NOT sync positions or re-apply force — that would
-        // reset balls mid-simulation when the Firestore snapshot echoes back.
-        if (shot.shooterUid === this.myUid) return;
+        // If this device fired this shot, animation is already running locally.
+        // Guard by timestamp — NOT by myUid, which changes every turn.
+        if (shot.timestamp === this.localFiredTimestamp) return;
 
         // Opponent's shot: sync starting positions then replay the physics.
         this.syncBallPositions(shot.ballPositions);
@@ -351,25 +355,27 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         ctx.fillText('DANGER', FORBIDDEN.x + FORBIDDEN.w / 2, FORBIDDEN.y + FORBIDDEN.h / 2 + 11);
 
         // Blinking highlight on the active ball — always visible on your turn.
-        // Outer ring: slow breathe (1.2s cycle). Inner ring: faster pulse (0.5s).
-        if (this.canShoot && !this.simulating) {
-            const ball = this.shooterBody;
+        // Blink on the active player's ball — visible to BOTH players on any device.
+        // Uses body.label === activePlayerUid so it works independently of canShoot/myUid.
+        if (!this.simulating && this.game?.phase === 'PLAYING') {
+            const activeUid = this.game.activePlayerUid;
+            const activeBall = this.bodyForUid(activeUid);
             const t = Date.now();
 
-            // Outer slow breathe
+            // Outer slow breathe (1.2s cycle) — always on during active turn
             const outerPulse = 0.5 + 0.5 * Math.sin(t / 600);
             ctx.setLineDash([]);
             ctx.beginPath();
-            ctx.arc(ball.position.x, ball.position.y, BALL_R + 10 + outerPulse * 8, 0, Math.PI * 2);
+            ctx.arc(activeBall.position.x, activeBall.position.y, BALL_R + 10 + outerPulse * 8, 0, Math.PI * 2);
             ctx.strokeStyle = `rgba(255, 220, 0, ${(0.2 + outerPulse * 0.5).toFixed(2)})`;
             ctx.lineWidth = 2.5;
             ctx.stroke();
 
-            // Inner fast blink — only when idle (prompts player to tap)
-            if (this.shootPhase === 'idle') {
+            // Inner fast blink — only on this device's turn + idle phase
+            if (this.isMyTurn && this.shootPhase === 'idle') {
                 const innerPulse = 0.5 + 0.5 * Math.sin(t / 250);
                 ctx.beginPath();
-                ctx.arc(ball.position.x, ball.position.y, BALL_R + 4 + innerPulse * 3, 0, Math.PI * 2);
+                ctx.arc(activeBall.position.x, activeBall.position.y, BALL_R + 4 + innerPulse * 3, 0, Math.PI * 2);
                 ctx.strokeStyle = `rgba(255, 255, 255, ${(0.3 + innerPulse * 0.5).toFixed(2)})`;
                 ctx.lineWidth = 1.5;
                 ctx.stroke();
@@ -397,8 +403,8 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         const p0 = this.game.players[order[0]];
         const p1 = this.game.players[order[1]];
 
-        if (p0) this.drawBall(ctx, this.bodies.shooter, p0.color, BALL_R, p0.displayName);
-        if (p1) this.drawBall(ctx, this.bodies.opponent, p1.color, BALL_R, p1.displayName);
+        if (p0) this.drawBall(ctx, this.bodies.shooter, p0.color, BALL_R, '');
+        if (p1) this.drawBall(ctx, this.bodies.opponent, p1.color, BALL_R, '');
         this.drawBall(ctx, this.bodies.white, '#ffffff', BALL_R, '');
 
         // Velocity badge above ball during swipe (drawn last = on top of everything)
@@ -462,7 +468,10 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
         }
     }
 
-    private get shooterBody(): Matter.Body { return this.bodyForUid(this.myUid); }
+    // The active player's body — always correct regardless of myUid/slot logic
+    private get shooterBody(): Matter.Body {
+        return this.bodyForUid(this.game.activePlayerUid);
+    }
 
     private bodyForUid(uid: string): Matter.Body {
         // Match by the label set on the Matter body in initEngine().
