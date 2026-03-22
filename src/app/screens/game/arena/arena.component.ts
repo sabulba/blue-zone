@@ -310,14 +310,25 @@ export class ArenaComponent implements AfterViewInit, OnChanges, OnDestroy {
                     self.pendingPositions = null;
                 }
 
-                const newPositions = self.currentBallPositions();
-                const shooterBallInForbidden = self.inForbidden(
-                    self.bodyForUid(shot.shooterUid).position,
-                );
-                const opponentBallInForbidden = self.inForbidden(
-                    self.bodyForUid(self.game.playerOrder.find((u) => u !== shot.shooterUid)!).position,
-                );
+                const opponentUid = self.game.playerOrder.find((u) => u !== shot.shooterUid)!;
+                const shooterBody  = self.bodyForUid(shot.shooterUid);
+                const opponentBody = self.bodyForUid(opponentUid);
 
+                const shooterBallInForbidden  = self.inForbidden(shooterBody.position);
+                const opponentBallInForbidden = self.inForbidden(opponentBody.position);
+
+                // If ANY ball entered the forbidden zone — reset ALL balls to
+                // their initial positions (full board reset, not just one ball).
+                if (shooterBallInForbidden || opponentBallInForbidden) {
+                    Matter.Body.setPosition(self.bodies.shooter, { ...ARENA.BALL_START_P1 });
+                    Matter.Body.setPosition(self.bodies.opponent, { ...ARENA.BALL_START_P2 });
+                    Matter.Body.setPosition(self.bodies.white,    { ...ARENA.BALL_START_WHITE });
+                    Matter.Body.setVelocity(self.bodies.shooter,  { x: 0, y: 0 });
+                    Matter.Body.setVelocity(self.bodies.opponent,  { x: 0, y: 0 });
+                    Matter.Body.setVelocity(self.bodies.white,     { x: 0, y: 0 });
+                }
+
+                const newPositions = self.currentBallPositions();
                 const simResult: SimResult = { ballPositions: newPositions, hitWhite, shooterBallInForbidden, opponentBallInForbidden };
                 self.zone.run(() => self.simulationDone.emit({ simResult, shot }));
             } else {
